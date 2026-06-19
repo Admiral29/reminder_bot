@@ -11,14 +11,12 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Читаем ID темы из переменных окружения (если не задано — None)
 ALLOWED_THREAD_ID = os.getenv("ALLOWED_THREAD_ID")
 if ALLOWED_THREAD_ID is not None:
     try:
         ALLOWED_THREAD_ID = int(ALLOWED_THREAD_ID)
     except ValueError:
         ALLOWED_THREAD_ID = None
-        print("⚠️ ALLOWED_THREAD_ID указан неверно, бот будет работать во всех темах.")
 
 app = Client("mention_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -42,18 +40,18 @@ def save_jobs():
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"jobs": jobs, "counter": job_counter}, f, ensure_ascii=False, indent=2)
 
-# ---------- ПРОВЕРКА ТЕМЫ (упрощённая) ----------
+# ---------- ПРОВЕРКА ТЕМЫ (безопасно) ----------
 def is_allowed(message):
     if ALLOWED_THREAD_ID is None:
         return True
-    # Если сообщение из темы, проверяем ID
-    if message.message_thread_id:
-        return message.message_thread_id == ALLOWED_THREAD_ID
-    # Если сообщение из общего чата (без темы) и разрешённая тема не задана — разрешаем
-    # Но если мы ограничили тему, то сообщения из общего чата игнорируем
+    thread_id = getattr(message, 'message_thread_id', None)
+    # Если сообщение из темы, сравниваем ID
+    if thread_id is not None:
+        return thread_id == ALLOWED_THREAD_ID
+    # Если сообщение из общего чата (без темы), а мы ограничили тему — запрещаем
     return False
 
-# ---------- ФИЛЬТР ДЛЯ КОМАНД ----------
+# ---------- ФИЛЬТР ----------
 def topic_filter(_, __, message):
     return is_allowed(message)
 
@@ -101,7 +99,7 @@ async def scheduler_loop():
         save_jobs()
         await asyncio.sleep(30)
 
-# ---------- КОМАНДЫ (все с фильтром темы) ----------
+# ---------- КОМАНДЫ ----------
 @app.on_message(filters.command("all") & filters.group & filters.create(topic_filter))
 async def mention_all(client, message):
     chat_id = message.chat.id
@@ -245,14 +243,14 @@ async def set_remind(client, message):
     except Exception as e:
         await message.reply(f"Ошибка: {e}")
 
-# ---------- УСТАНОВКА МЕНЮ КОМАНД ----------
+# ---------- МЕНЮ КОМАНД ----------
 async def set_commands():
     commands = [
         BotCommand("all", "Упомянуть всех участников"),
-        BotCommand("set_remind", "Установить напоминание (разовое, daily, weekly, с интервалом)"),
+        BotCommand("set_remind", "Установить напоминание"),
         BotCommand("list_reminds", "Показать активные напоминания"),
-        BotCommand("cancel_remind", "Отменить все или конкретное напоминание"),
-        BotCommand("start", "Показать справку"),
+        BotCommand("cancel_remind", "Отменить напоминание"),
+        BotCommand("start", "Помощь"),
     ]
     await app.set_bot_commands(commands)
     print("✅ Меню команд установлено.")
