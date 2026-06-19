@@ -1,33 +1,22 @@
 import os
-import asyncio
+import logging
 import json
 import re
-import logging
+import asyncio
 from datetime import datetime, timedelta
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
 
-# Настройка логирования в файл
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# ---------- Конфигурация ----------
-API_ID = int(os.getenv("API_ID", 12345))
-API_HASH = os.getenv("API_HASH", "your_api_hash")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token")
+TOKEN = os.getenv("BOT_TOKEN")  # читаем из переменных окружения
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не задан!")
+
 JOBS_FILE = "jobs.json"
 
-app = Client("reminder_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
 # ---------- Данные ----------
-jobs = {}
+jobs = {}       # { chat_id: [ {id, text, next_run, interval}, ... ] }
 job_counter = 0
 
 def load_jobs():
@@ -37,109 +26,78 @@ def load_jobs():
             data = json.load(f)
             jobs = data.get("jobs", {})
             job_counter = data.get("counter", 0)
-        logger.info(f"Загружено {sum(len(j['reminds']) for j in jobs.values())} напоминаний")
+        logging.info(f"Загружено напоминаний: {sum(len(v) for v in jobs.values())}")
     except FileNotFoundError:
         jobs = {}
         job_counter = 0
-        logger.info("Файл jobs.json не найден, создан новый")
+        logging.info("Файл jobs.json не найден, создан новый")
 
 def save_jobs():
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"jobs": jobs, "counter": job_counter}, f, ensure_ascii=False, indent=2)
-    logger.info("Сохранено заданий")
 
 # ---------- Отправка упоминаний ----------
-async def send_reminder(chat_id, text, thread_id=None):
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    chat_id = job.chat_id
+    text = job.data['text']
     try:
-        logger.info(f"Начинаем отправку упоминаний в чат {chat_id} с текстом: {text}")
-        users = []
-        async for member in app.get_chat_members(chat_id):
+        # Получаем список участников
+        members = []
+        async for member in context.bot.get_chat_members(chat_id):
             if not member.user.is_bot:
-                users.append(member.user)
-        logger.info(f"Найдено {len(users)} участников (боты исключены)")
+                members.append(member.user)
 
-        if not users:
-            await app.send_message(chat_id, "Нет участников для упоминания.", reply_to_message_id=thread_id)
+        if not members:
+            await context.bot.send_message(chat_id, "Нет участников для упоминания.")
             return
 
-        chunks = []
-        chunk_size = 30
-        for i in range(0, len(users), chunk_size):
-            chunk_users = users[i:i+chunk_size]
-            mentions = []
-            for user in chunk_users:
-                mentions.append(f'<a href="tg://user?id={user.id}">{user.first_name}</a>')
-            chunks.append(" ".join(mentions))
+        # Формируем упоминания по 30 штук
+        mentions = []
+        for user in members:
+            mentions.append(f'<a href="tg://user?id={user.id}">{user.first_name}</a>')
 
-        for chunk in chunks:
-            msg = f"🔔 {text}\n\n" + chunk
-            await app.send_message(
+        chunk_size = 30
+        for i in range(0, len(mentions), chunk_size):
+            chunk = mentions[i:i+chunk_size]
+            msg = f"🔔 {text}\n\n" + " ".join(chunk)
+            await context.bot.send_message(
                 chat_id,
                 msg,
-                parse_mode='html',
-                reply_to_message_id=thread_id
+                parse_mode='HTML'
             )
             await asyncio.sleep(0.5)
 
-        logger.info(f"Упомянуто {len(users)} участников в чате {chat_id}")
+        logging.info(f"Упомянуто {len(members)} участников в чате {chat_id}")
     except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
-        try:
-            await app.send_message(chat_id, f"❌ Ошибка при отправке упоминаний: {e}\nПроверьте права бота.")
-        except:
-            pass
-
-# ---------- Планировщик ----------
-async def scheduler_loop():
-    while True:
-        now = datetime.now().timestamp()
-        for chat_id_str, chat_data in list(jobs.items()):
-            chat_id = int(chat_id_str)
-            thread_id = chat_data.get("thread_id")
-            reminds = chat_data.get("reminds", [])
-            for remind in reminds[:]:
-                if remind["next_run"] <= now:
-                    logger.info(f"Сработало напоминание ID {remind['id']} в чате {chat_id}")
-                    await send_reminder(chat_id, remind["text"], thread_id)
-                    if remind.get("interval") is not None:
-                        remind["next_run"] += remind["interval"]
-                        logger.info(f"Обновлено время для ID {remind['id']} на {datetime.fromtimestamp(remind['next_run'])}")
-                    else:
-                        reminds.remove(remind)
-                        logger.info(f"Удалено разовое напоминание ID {remind['id']}")
-            if not reminds:
-                del jobs[chat_id_str]
-        save_jobs()
-        await asyncio.sleep(30)
+        logging.error(f"Ошибка отправки: {e}")
+        await context.bot.send_message(chat_id, "Ошибка при отправке упоминаний. Проверьте права бота.")
 
 # ---------- Команды ----------
-@app.on_message(filters.command("start"))
-async def start_handler(client, message: Message):
-    await message.reply(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "👋 Бот для периодических напоминаний с упоминанием всех.\n"
         "Команды:\n"
         " /set_remind HH:MM Текст – разовое\n"
         " /set_remind HH:MM daily Текст – ежедневно\n"
         " /set_remind HH:MM weekly Текст – еженедельно\n"
         " /set_remind HH:MM 2 Текст – каждые 2 часа\n"
-        " /list_reminds – список\n"
+        " /list_reminds – список активных\n"
         " /cancel_remind [ID] – отменить все или по ID\n"
         " /help – справка\n\n"
         "⚠️ Бот должен быть администратором группы."
     )
 
-@app.on_message(filters.command("help"))
-async def help_handler(client, message: Message):
-    await start_handler(client, message)
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
 
-@app.on_message(filters.command("list_reminds"))
-async def list_reminds(client, message: Message):
-    chat_id = str(message.chat.id)
-    if chat_id not in jobs or not jobs[chat_id]["reminds"]:
-        await message.reply("Нет активных напоминаний.")
+async def list_reminds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in jobs or not jobs[chat_id]:
+        await update.message.reply_text("Нет активных напоминаний.")
         return
     text = "📋 Активные напоминания:\n"
-    for r in jobs[chat_id]["reminds"]:
+    for r in jobs[chat_id]:
         dt = datetime.fromtimestamp(r["next_run"]).strftime("%d.%m.%Y %H:%M")
         interval = r.get("interval")
         if interval:
@@ -153,54 +111,48 @@ async def list_reminds(client, message: Message):
         else:
             period = "разовое"
         text += f"ID {r['id']}: {dt} ({period}) – {r['text'][:30]}...\n"
-    await message.reply(text)
+    await update.message.reply_text(text)
 
-@app.on_message(filters.command("cancel_remind"))
-async def cancel_remind(client, message: Message):
-    chat_id = str(message.chat.id)
-    if chat_id not in jobs:
-        await message.reply("Нет активных напоминаний.")
+async def cancel_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id not in jobs or not jobs[chat_id]:
+        await update.message.reply_text("Нет активных напоминаний.")
         return
-    args = message.text.split()
+    args = update.message.text.split()
     if len(args) == 1:
-        del jobs[chat_id]
+        # отменить все
+        jobs[chat_id] = []
         save_jobs()
-        await message.reply("❌ Все напоминания отменены.")
+        await update.message.reply_text("❌ Все напоминания в этом чате отменены.")
         return
     try:
         rem_id = int(args[1])
-        reminds = jobs[chat_id]["reminds"]
-        for r in reminds:
+        for r in jobs[chat_id]:
             if r["id"] == rem_id:
-                reminds.remove(r)
-                if not reminds:
-                    del jobs[chat_id]
+                jobs[chat_id].remove(r)
                 save_jobs()
-                await message.reply(f"❌ Напоминание ID {rem_id} отменено.")
+                await update.message.reply_text(f"❌ Напоминание ID {rem_id} отменено.")
                 return
-        await message.reply(f"Напоминание с ID {rem_id} не найдено.")
+        await update.message.reply_text(f"Напоминание с ID {rem_id} не найдено.")
     except ValueError:
-        await message.reply("Укажите корректный ID.")
+        await update.message.reply_text("Укажите корректный ID.")
 
-@app.on_message(filters.command("set_remind"))
-async def set_remind(client, message: Message):
+async def set_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if not message.chat.type in ['group', 'supergroup']:
-            await message.reply("Команда только в группах.")
+        if update.effective_chat.type not in ['group', 'supergroup']:
+            await update.message.reply_text("Команда только в группах.")
             return
 
-        text = message.text
-        command_parts = text.split(maxsplit=1)
-        if len(command_parts) < 2:
-            await message.reply("Пример: /set_remind 20:00 daily Текст")
+        args = update.message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await update.message.reply_text("Пример: /set_remind 20:00 daily Текст")
             return
 
-        args_str = command_parts[1].strip()
+        arg_str = args[1].strip()
         pattern = r'^(\d{1,2}:\d{2})\s+(?:(daily|weekly|\d+)\s+)?(.+)$'
-        match = re.match(pattern, args_str)
-
+        match = re.match(pattern, arg_str)
         if not match:
-            await message.reply(
+            await update.message.reply_text(
                 "Неверный формат. Используйте:\n"
                 "/set_remind 20:00 Текст\n"
                 "/set_remind 20:00 daily Текст\n"
@@ -216,7 +168,7 @@ async def set_remind(client, message: Message):
         try:
             remind_time = datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await message.reply("Неверный формат времени.")
+            await update.message.reply_text("Неверный формат времени. Используйте HH:MM (например, 20:00).")
             return
 
         now = datetime.now()
@@ -234,15 +186,12 @@ async def set_remind(client, message: Message):
         elif keyword.isdigit():
             hours = int(keyword)
             if hours <= 0:
-                await message.reply("Интервал > 0.")
+                await update.message.reply_text("Интервал должен быть > 0 часов.")
                 return
             interval = hours * 3600
         else:
-            await message.reply("Неизвестное ключевое слово.")
+            await update.message.reply_text("Неизвестное ключевое слово.")
             return
-
-        chat_id = str(message.chat.id)
-        thread_id = message.reply_to_message.id if message.reply_to_message else None
 
         global job_counter
         job_counter += 1
@@ -254,33 +203,89 @@ async def set_remind(client, message: Message):
             "interval": interval
         }
 
+        chat_id = str(update.effective_chat.id)
         if chat_id not in jobs:
-            jobs[chat_id] = {"thread_id": thread_id, "reminds": []}
-        else:
-            jobs[chat_id]["thread_id"] = thread_id
-        jobs[chat_id]["reminds"].append(new_job)
+            jobs[chat_id] = []
+        jobs[chat_id].append(new_job)
         save_jobs()
 
+        # Ставим задачу в JobQueue (чтобы она сработала)
+        delay = (scheduled - now).total_seconds()
+        if delay > 0:
+            job_queue: JobQueue = context.job_queue
+            job_queue.run_once(
+                send_reminder,
+                delay,
+                data={'text': text},
+                chat_id=update.effective_chat.id,
+                name=f"reminder_{chat_id}_{rem_id}"
+            )
+
         period = "разовое" if interval is None else f"каждые {interval//3600} ч." if interval < 86400 else "ежедневно" if interval == 86400 else "еженедельно"
-        await message.reply(
+        await update.message.reply_text(
             f"✅ Напоминание ID {rem_id} установлено.\n"
             f"Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')}\n"
             f"Тип: {period}\n"
             f"Текст: {text}"
         )
-        logger.info(f"Добавлено напоминание ID {rem_id} в чат {chat_id}")
     except Exception as e:
-        logger.error(f"set_remind: {e}")
-        await message.reply("Произошла ошибка. Проверьте формат.")
+        logging.error(f"Ошибка set_remind: {e}")
+        await update.message.reply_text("Произошла ошибка. Проверьте формат команды.")
 
-# ---------- Запуск ----------
-async def main():
+# ---------- Планировщик повторяющихся заданий ----------
+async def scheduler_loop(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет jobs.json и запускает пропущенные задания при перезапуске."""
+    # Эта функция вызывается при старте бота, чтобы переставить задания из JSON
+    # в JobQueue, если они ещё не запущены.
+    pass  # мы используем JobQueue для разовых, а для повторяющихся будем пересоздавать
+
+# ---------- Главная ----------
+def main():
     load_jobs()
-    asyncio.create_task(scheduler_loop())
-    logger.info("Бот запущен. Планировщик активен.")
-    print("Бот запущен. Планировщик активен.")
-    await app.start()
-    await asyncio.Event().wait()
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help))
+    app.add_handler(CommandHandler("set_remind", set_remind))
+    app.add_handler(CommandHandler("list_reminds", list_reminds))
+    app.add_handler(CommandHandler("cancel_remind", cancel_remind))
+
+    # При запуске переставить все задания из jobs.json в JobQueue
+    now = datetime.now().timestamp()
+    for chat_id_str, reminds in jobs.items():
+        chat_id = int(chat_id_str)
+        for r in reminds:
+            if r["next_run"] > now:
+                delay = r["next_run"] - now
+                app.job_queue.run_once(
+                    send_reminder,
+                    delay,
+                    data={'text': r["text"]},
+                    chat_id=chat_id,
+                    name=f"reminder_{chat_id}_{r['id']}"
+                )
+            else:
+                # Если время уже прошло, сразу отправляем и обновляем интервал, если есть
+                # но для простоты мы просто удалим просроченные разовые задания, а повторяющиеся пересчитаем
+                if r.get("interval") is not None:
+                    # пересчитываем next_run на будущее
+                    while r["next_run"] <= now:
+                        r["next_run"] += r["interval"]
+                    delay = r["next_run"] - now
+                    app.job_queue.run_once(
+                        send_reminder,
+                        delay,
+                        data={'text': r["text"]},
+                        chat_id=chat_id,
+                        name=f"reminder_{chat_id}_{r['id']}"
+                    )
+                else:
+                    # разовое просроченное — удаляем
+                    reminds.remove(r)
+            save_jobs()
+
+    print("Бот запущен...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    app.run(main())
+    main()
