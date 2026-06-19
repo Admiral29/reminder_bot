@@ -11,13 +11,6 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ALLOWED_THREAD_ID = os.getenv("ALLOWED_THREAD_ID")
-if ALLOWED_THREAD_ID is not None:
-    try:
-        ALLOWED_THREAD_ID = int(ALLOWED_THREAD_ID)
-    except ValueError:
-        ALLOWED_THREAD_ID = None
-
 app = Client("mention_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 JOBS_FILE = "jobs.json"
@@ -39,21 +32,6 @@ def load_jobs():
 def save_jobs():
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"jobs": jobs, "counter": job_counter}, f, ensure_ascii=False, indent=2)
-
-# ---------- ПРОВЕРКА ТЕМЫ (безопасно) ----------
-def is_allowed(message):
-    if ALLOWED_THREAD_ID is None:
-        return True
-    thread_id = getattr(message, 'message_thread_id', None)
-    # Если сообщение из темы, сравниваем ID
-    if thread_id is not None:
-        return thread_id == ALLOWED_THREAD_ID
-    # Если сообщение из общего чата (без темы), а мы ограничили тему — запрещаем
-    return False
-
-# ---------- ФИЛЬТР ----------
-def topic_filter(_, __, message):
-    return is_allowed(message)
 
 # ---------- ОТПРАВКА УПОМИНАНИЙ ----------
 async def send_reminder(chat_id, text):
@@ -99,8 +77,8 @@ async def scheduler_loop():
         save_jobs()
         await asyncio.sleep(30)
 
-# ---------- КОМАНДЫ ----------
-@app.on_message(filters.command("all") & filters.group & filters.create(topic_filter))
+# ---------- КОМАНДА /all ----------
+@app.on_message(filters.command("all") & filters.group)
 async def mention_all(client, message):
     chat_id = message.chat.id
     try:
@@ -125,7 +103,8 @@ async def mention_all(client, message):
     except Exception as e:
         await message.reply(f"Ошибка: {e}")
 
-@app.on_message(filters.command("start") & filters.group & filters.create(topic_filter))
+# ---------- КОМАНДА /start ----------
+@app.on_message(filters.command("start") & filters.group)
 async def start_cmd(client, message):
     await message.reply(
         "👋 Команды:\n"
@@ -140,7 +119,8 @@ async def start_cmd(client, message):
         "Если ваш часовой пояс +3 (Москва), то для 20:00 по Москве пишите 17:00 UTC."
     )
 
-@app.on_message(filters.command("list_reminds") & filters.group & filters.create(topic_filter))
+# ---------- КОМАНДА /list_reminds ----------
+@app.on_message(filters.command("list_reminds") & filters.group)
 async def list_reminds(client, message):
     chat_id = str(message.chat.id)
     if chat_id not in jobs or not jobs[chat_id]:
@@ -154,7 +134,8 @@ async def list_reminds(client, message):
         text += f"ID {r['id']}: {dt} ({period}) – {r['text'][:30]}...\n"
     await message.reply(text)
 
-@app.on_message(filters.command("cancel_remind") & filters.group & filters.create(topic_filter))
+# ---------- КОМАНДА /cancel_remind ----------
+@app.on_message(filters.command("cancel_remind") & filters.group)
 async def cancel_remind(client, message):
     chat_id = str(message.chat.id)
     if chat_id not in jobs or not jobs[chat_id]:
@@ -178,7 +159,8 @@ async def cancel_remind(client, message):
     except ValueError:
         await message.reply("Укажите корректный ID.")
 
-@app.on_message(filters.command("set_remind") & filters.group & filters.create(topic_filter))
+# ---------- КОМАНДА /set_remind ----------
+@app.on_message(filters.command("set_remind") & filters.group)
 async def set_remind(client, message):
     try:
         args = message.text.split(maxsplit=1)
@@ -261,7 +243,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     await app.start()
     await set_commands()
-    print(f"🚀 Бот запущен. Ограничение по теме: {ALLOWED_THREAD_ID if ALLOWED_THREAD_ID else 'нет'}")
+    print("🚀 Бот запущен. Работает во всех группах и темах.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
