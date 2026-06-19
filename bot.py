@@ -41,21 +41,15 @@ async def is_admin(chat_id, user_id):
     except:
         return False
 
-# ---------- ФИЛЬТР ДЛЯ АДМИНОВ ----------
-def admin_filter(_, __, message):
-    # Проверка будет выполнена асинхронно в обработчике, тут просто заглушка
-    # Можно использовать filters.create, но проще проверять внутри каждой команды
-    return True  # проверяем внутри команды
-
-# ---------- ОТПРАВКА УПОМИНАНИЙ (с учётом темы) ----------
-async def send_reminder(chat_id, text, thread_id=None):
+# ---------- ОТПРАВКА УПОМИНАНИЙ ----------
+async def send_reminder(chat_id, text):
     try:
         users = []
         async for member in app.get_chat_members(chat_id):
             if not member.user.is_bot:
                 users.append(member.user)
         if not users:
-            await app.send_message(chat_id, "Нет участников для упоминания.", message_thread_id=thread_id)
+            await app.send_message(chat_id, "Нет участников для упоминания.")
             return
         mentions = []
         for user in users:
@@ -67,11 +61,11 @@ async def send_reminder(chat_id, text, thread_id=None):
         for i in range(0, len(mentions), chunk_size):
             chunk = mentions[i:i+chunk_size]
             msg = f"🔔 {text}\n\n" + " ".join(chunk)
-            await app.send_message(chat_id, msg, parse_mode=ParseMode.HTML, message_thread_id=thread_id)
-        print(f"Упомянуто {len(users)} участников в чате {chat_id} (тема {thread_id})")
+            await app.send_message(chat_id, msg, parse_mode=ParseMode.HTML)
+        print(f"Упомянуто {len(users)} участников в чате {chat_id}")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
-        await app.send_message(chat_id, f"Ошибка: {e}", message_thread_id=thread_id)
+        await app.send_message(chat_id, f"Ошибка: {e}")
 
 # ---------- ПЛАНИРОВЩИК ----------
 async def scheduler_loop():
@@ -81,8 +75,7 @@ async def scheduler_loop():
             chat_id = int(chat_id_str)
             for r in reminds[:]:
                 if r["next_run"] <= now:
-                    thread_id = r.get("thread_id")  # сохраняем тему из задания
-                    await send_reminder(chat_id, r["text"], thread_id)
+                    await send_reminder(chat_id, r["text"])
                     if r.get("interval") is not None:
                         r["next_run"] += r["interval"]
                     else:
@@ -92,24 +85,13 @@ async def scheduler_loop():
         save_jobs()
         await asyncio.sleep(30)
 
-# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТВЕТА В ТУ ЖЕ ТЕМУ ----------
-async def reply_in_thread(message, text, **kwargs):
-    """Отправляет ответ в ту же тему, откуда пришёл запрос."""
-    thread_id = message.message_thread_id
-    await app.send_message(
-        message.chat.id,
-        text,
-        message_thread_id=thread_id,
-        **kwargs
-    )
-
-# ---------- КОМАНДА /all (только для админов) ----------
+# ---------- КОМАНДА /all ----------
 @app.on_message(filters.command("all") & filters.group)
 async def mention_all(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not await is_admin(chat_id, user_id):
-        await reply_in_thread(message, "⛔ Только для администраторов.")
+        await message.reply("⛔ Только для администраторов.")
         return
     try:
         users = []
@@ -117,7 +99,7 @@ async def mention_all(client, message):
             if not member.user.is_bot:
                 users.append(member.user)
         if not users:
-            await reply_in_thread(message, "Нет участников.")
+            await message.reply("Нет участников.")
             return
         mentions = []
         for user in users:
@@ -126,13 +108,12 @@ async def mention_all(client, message):
             else:
                 mentions.append(f'<a href="tg://user?id={user.id}">{user.first_name}</a>')
         chunk_size = 50
-        thread_id = message.message_thread_id
         for i in range(0, len(mentions), chunk_size):
             chunk = mentions[i:i+chunk_size]
             msg = "📢 Всем привет!\n\n" + " ".join(chunk)
-            await app.send_message(chat_id, msg, parse_mode=ParseMode.HTML, message_thread_id=thread_id)
+            await app.send_message(chat_id, msg, parse_mode=ParseMode.HTML)
     except Exception as e:
-        await reply_in_thread(message, f"Ошибка: {e}")
+        await message.reply(f"Ошибка: {e}")
 
 # ---------- КОМАНДА /start ----------
 @app.on_message(filters.command("start") & filters.group)
@@ -140,11 +121,10 @@ async def start_cmd(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not await is_admin(chat_id, user_id):
-        await reply_in_thread(message, "⛔ Только для администраторов.")
+        await message.reply("⛔ Только для администраторов.")
         return
-    await reply_in_thread(
-        message,
-        "👋 Команды:\n"
+    await message.reply(
+        "👋 Команды (только для админов):\n"
         "/all – упомянуть всех\n"
         "/set_remind HH:MM Текст – разовое\n"
         "/set_remind HH:MM daily Текст – ежедневно\n"
@@ -153,7 +133,7 @@ async def start_cmd(client, message):
         "/list_reminds – список\n"
         "/cancel_remind [ID] – отменить все или по ID\n\n"
         "⚠️ Время указывается в UTC (по Гринвичу).\n"
-        "Если ваш часовой пояс +3 (Москва), то для 20:00 по Москве пишите 17:00 UTC."
+        "Например, для 20:00 по Москве пишите 17:00 UTC."
     )
 
 # ---------- КОМАНДА /list_reminds ----------
@@ -162,11 +142,11 @@ async def list_reminds(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not await is_admin(chat_id, user_id):
-        await reply_in_thread(message, "⛔ Только для администраторов.")
+        await message.reply("⛔ Только для администраторов.")
         return
     chat_id_str = str(chat_id)
     if chat_id_str not in jobs or not jobs[chat_id_str]:
-        await reply_in_thread(message, "Нет активных напоминаний.")
+        await message.reply("Нет активных напоминаний.")
         return
     text = "📋 Активные напоминания:\n"
     for r in jobs[chat_id_str]:
@@ -174,7 +154,7 @@ async def list_reminds(client, message):
         interval = r.get("interval")
         period = "разовое" if interval is None else ("ежедневно" if interval == 86400 else "еженедельно" if interval == 604800 else f"каждые {interval//3600} ч.")
         text += f"ID {r['id']}: {dt} ({period}) – {r['text'][:30]}...\n"
-    await reply_in_thread(message, text)
+    await message.reply(text)
 
 # ---------- КОМАНДА /cancel_remind ----------
 @app.on_message(filters.command("cancel_remind") & filters.group)
@@ -182,17 +162,17 @@ async def cancel_remind(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not await is_admin(chat_id, user_id):
-        await reply_in_thread(message, "⛔ Только для администраторов.")
+        await message.reply("⛔ Только для администраторов.")
         return
     chat_id_str = str(chat_id)
     if chat_id_str not in jobs or not jobs[chat_id_str]:
-        await reply_in_thread(message, "Нет активных напоминаний.")
+        await message.reply("Нет активных напоминаний.")
         return
     args = message.text.split()
     if len(args) == 1:
         jobs[chat_id_str] = []
         save_jobs()
-        await reply_in_thread(message, "❌ Все напоминания в этом чате отменены.")
+        await message.reply("❌ Все напоминания в этом чате отменены.")
         return
     try:
         rem_id = int(args[1])
@@ -200,11 +180,11 @@ async def cancel_remind(client, message):
             if r["id"] == rem_id:
                 jobs[chat_id_str].remove(r)
                 save_jobs()
-                await reply_in_thread(message, f"❌ Напоминание ID {rem_id} отменено.")
+                await message.reply(f"❌ Напоминание ID {rem_id} отменено.")
                 return
-        await reply_in_thread(message, f"Напоминание с ID {rem_id} не найдено.")
+        await message.reply(f"Напоминание с ID {rem_id} не найдено.")
     except ValueError:
-        await reply_in_thread(message, "Укажите корректный ID.")
+        await message.reply("Укажите корректный ID.")
 
 # ---------- КОМАНДА /set_remind ----------
 @app.on_message(filters.command("set_remind") & filters.group)
@@ -212,18 +192,18 @@ async def set_remind(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not await is_admin(chat_id, user_id):
-        await reply_in_thread(message, "⛔ Только для администраторов.")
+        await message.reply("⛔ Только для администраторов.")
         return
     try:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            await reply_in_thread(message, "Пример: /set_remind 20:00 daily Текст")
+            await message.reply("Пример: /set_remind 20:00 daily Текст")
             return
         arg_str = args[1].strip()
         pattern = r'^(\d{1,2}:\d{2})\s+(?:(daily|weekly|\d+)\s+)?(.+)$'
         match = re.match(pattern, arg_str)
         if not match:
-            await reply_in_thread(message, "Неверный формат.\nПример: /set_remind 20:00 daily Текст")
+            await message.reply("Неверный формат.\nПример: /set_remind 20:00 daily Текст")
             return
         time_str = match.group(1)
         keyword = match.group(2)
@@ -245,23 +225,21 @@ async def set_remind(client, message):
         elif keyword.isdigit():
             hours = int(keyword)
             if hours <= 0:
-                await reply_in_thread(message, "Интервал должен быть > 0.")
+                await message.reply("Интервал должен быть > 0.")
                 return
             interval = hours * 3600
         else:
-            await reply_in_thread(message, "Неизвестное ключевое слово (используйте daily, weekly или число часов).")
+            await message.reply("Неизвестное ключевое слово (используйте daily, weekly или число часов).")
             return
 
         global job_counter
         job_counter += 1
         rem_id = job_counter
-        thread_id = message.message_thread_id  # сохраняем тему
         new_job = {
             "id": rem_id,
             "text": text,
             "next_run": scheduled.timestamp(),
-            "interval": interval,
-            "thread_id": thread_id  # запоминаем, чтобы потом отправлять в ту же тему
+            "interval": interval
         }
         chat_id_str = str(chat_id)
         if chat_id_str not in jobs:
@@ -270,15 +248,14 @@ async def set_remind(client, message):
         save_jobs()
 
         period = "разовое" if interval is None else ("ежедневно" if interval == 86400 else "еженедельно" if interval == 604800 else f"каждые {interval//3600} ч.")
-        await reply_in_thread(
-            message,
+        await message.reply(
             f"✅ Напоминание ID {rem_id} установлено.\n"
             f"Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')} UTC\n"
             f"Тип: {period}\n"
             f"Текст: {text}"
         )
     except Exception as e:
-        await reply_in_thread(message, f"Ошибка: {e}")
+        await message.reply(f"Ошибка: {e}")
 
 # ---------- МЕНЮ КОМАНД ----------
 async def set_commands():
@@ -298,7 +275,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     await app.start()
     await set_commands()
-    print("🚀 Бот запущен. Команды только для админов. Ответы в ту же тему.")
+    print("🚀 Бот запущен. Команды только для админов.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
