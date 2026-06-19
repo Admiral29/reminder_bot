@@ -14,10 +14,9 @@ JOBS_FILE = "jobs.json"
 
 app = Client("reminder_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ---------- Структура данных ----------
-# jobs = { chat_id: { "thread_id": thread_id, "reminds": [ { "id": int, "text": str, "next_run": timestamp, "interval": int (секунды) или None для разового } ] } }
+# ---------- Данные ----------
 jobs = {}
-job_counter = 0  # глобальный счётчик ID
+job_counter = 0
 
 def load_jobs():
     global jobs, job_counter
@@ -78,21 +77,17 @@ async def scheduler_loop():
             chat_id = int(chat_id_str)
             thread_id = chat_data.get("thread_id")
             reminds = chat_data.get("reminds", [])
-            for remind in reminds[:]:  # копия для изменения
+            for remind in reminds[:]:
                 if remind["next_run"] <= now:
-                    # Отправляем
                     await send_reminder(chat_id, remind["text"], thread_id)
-                    # Обновляем время следующего запуска
                     if remind.get("interval") is not None:
                         remind["next_run"] += remind["interval"]
                     else:
-                        # Разовое – удаляем
                         reminds.remove(remind)
-            # если список пуст, можно удалить запись чата
             if not reminds:
                 del jobs[chat_id_str]
         save_jobs()
-        await asyncio.sleep(30)  # проверяем каждые 30 секунд
+        await asyncio.sleep(30)
 
 # ---------- Команды ----------
 @app.on_message(filters.command("start"))
@@ -103,10 +98,10 @@ async def start_handler(client, message: Message):
         " /set_remind HH:MM Текст – разовое\n"
         " /set_remind HH:MM daily Текст – ежедневно\n"
         " /set_remind HH:MM weekly Текст – еженедельно\n"
-        " /set_remind HH:MM INTERVAL_ЧАСОВ Текст – повторять через часы\n"
-        " /list_reminds – список активных\n"
+        " /set_remind HH:MM 2 Текст – каждые 2 часа\n"
+        " /list_reminds – список\n"
         " /cancel_remind [ID] – отменить все или по ID\n"
-        " /help – эта справка\n\n"
+        " /help – справка\n\n"
         "⚠️ Бот должен быть администратором группы."
     )
 
@@ -118,7 +113,7 @@ async def help_handler(client, message: Message):
 async def list_reminds(client, message: Message):
     chat_id = str(message.chat.id)
     if chat_id not in jobs or not jobs[chat_id]["reminds"]:
-        await message.reply("Нет активных напоминаний в этом чате.")
+        await message.reply("Нет активных напоминаний.")
         return
     text = "📋 Активные напоминания:\n"
     for r in jobs[chat_id]["reminds"]:
@@ -143,17 +138,12 @@ async def cancel_remind(client, message: Message):
     if chat_id not in jobs:
         await message.reply("Нет активных напоминаний.")
         return
-
     args = message.text.split()
     if len(args) == 1:
-        # отменить все
-        jobs[chat_id]["reminds"] = []
         del jobs[chat_id]
         save_jobs()
-        await message.reply("❌ Все напоминания в этом чате отменены.")
+        await message.reply("❌ Все напоминания отменены.")
         return
-
-    # отменить по ID
     try:
         rem_id = int(args[1])
         reminds = jobs[chat_id]["reminds"]
@@ -167,7 +157,7 @@ async def cancel_remind(client, message: Message):
                 return
         await message.reply(f"Напоминание с ID {rem_id} не найдено.")
     except ValueError:
-        await message.reply("Укажите корректный ID или ничего для отмены всех.")
+        await message.reply("Укажите корректный ID.")
 
 @app.on_message(filters.command("set_remind"))
 async def set_remind(client, message: Message):
@@ -181,67 +171,56 @@ async def set_remind(client, message: Message):
 
         parts = args[1].split(maxsplit=2)
         if len(parts) < 2:
-            await message.reply("Неверный формат. Нужно: время и текст (и возможно ключевое слово daily/weekly/часы).")
+            await message.reply("Неверный формат.")
             return
 
         time_str = parts[0]
-        # Проверяем, есть ли ключевое слово во второй части
         rest = parts[1]
+        words = rest.split()
         keyword = None
         text = None
-        # если после времени идёт ключевое слово (daily, weekly или число)
-        # пытаемся разобрать
-        words = rest.split()
+
         if words and words[0].lower() in ("daily", "weekly"):
             keyword = words[0].lower()
             text = " ".join(words[1:]) if len(words) > 1 else ""
+        elif words and re.match(r'^\d+$', words[0]):
+            keyword = words[0]
+            text = " ".join(words[1:]) if len(words) > 1 else ""
         else:
-            # возможно, это число часов и текст
-            if re.match(r'^\d+$', words[0]):
-                keyword = words[0]  # число часов
-                text = " ".join(words[1:]) if len(words) > 1 else ""
-            else:
-                # значит, это просто текст без ключевого слова (разовое)
-                text = rest
+            text = rest
 
         if not text:
-            await message.reply("Укажите текст напоминания.")
+            await message.reply("Укажите текст.")
             return
 
-        # парсим время
         try:
             remind_time = datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await message.reply("Неверный формат времени. Используйте HH:MM (например, 20:00).")
+            await message.reply("Неверный формат времени. Используйте HH:MM")
             return
 
         now = datetime.now()
-        # дата сегодня, но время может быть уже прошло, тогда на завтра
         scheduled = datetime(now.year, now.month, now.day, remind_time.hour, remind_time.minute)
         if scheduled < now:
             scheduled += timedelta(days=1)
 
-        # определяем интервал
         interval = None
         if keyword is None:
-            # разовое
             pass
         elif keyword == "daily":
-            interval = 86400  # 24 часа
+            interval = 86400
         elif keyword == "weekly":
-            interval = 604800  # 7 дней
+            interval = 604800
         elif keyword.isdigit():
             hours = int(keyword)
             if hours <= 0:
-                await message.reply("Интервал должен быть больше 0 часов.")
+                await message.reply("Интервал > 0.")
                 return
             interval = hours * 3600
-            # первое срабатывание в указанное время
         else:
-            await message.reply("Неизвестное ключевое слово. Используйте daily, weekly или число часов.")
+            await message.reply("Неизвестный ключ.")
             return
 
-        # Создаём напоминание
         global job_counter
         job_counter += 1
         rem_id = job_counter
@@ -259,25 +238,25 @@ async def set_remind(client, message: Message):
         jobs[chat_id]["reminds"].append(new_job)
         save_jobs()
 
-        period = "разовое" if interval is None else f"повторяющееся каждые {interval//3600} ч." if interval < 86400 else "ежедневно" if interval == 86400 else "еженедельно"
+        period = "разовое" if interval is None else f"каждые {interval//3600} ч." if interval < 86400 else "ежедневно" if interval == 86400 else "еженедельно"
         await message.reply(
             f"✅ Напоминание ID {rem_id} установлено.\n"
-            f"Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')}\n"
+            f"Первое: {scheduled.strftime('%d.%m.%Y %H:%M')}\n"
             f"Тип: {period}\n"
             f"Текст: {text}"
         )
     except Exception as e:
         print(f"Ошибка set_remind: {e}")
-        await message.reply("Произошла ошибка. Проверьте формат команды.")
+        await message.reply("Ошибка. Проверьте формат.")
 
-# ---------- Запуск планировщика и бота ----------
+# ---------- Запуск ----------
 async def main():
     load_jobs()
-    # запускаем фоновую задачу планировщика
     asyncio.create_task(scheduler_loop())
     print("Бот запущен. Планировщик активен.")
     await app.start()
-    await app.idle()
+    # Бесконечное ожидание (замена idle)
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     app.run(main())
