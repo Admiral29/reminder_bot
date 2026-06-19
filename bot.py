@@ -86,9 +86,7 @@ async def cancel_handler(client, message: Message):
 @app.on_message(filters.command("remind"))
 async def remind_handler(client, message: Message):
     try:
-        if not message.chat.type in ['group', 'supergroup']:
-            await message.reply("Команда только в группах.")
-            return
+      
 
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
