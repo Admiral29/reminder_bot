@@ -2,10 +2,21 @@ import os
 import asyncio
 import json
 import re
-import shlex
+import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
+# Настройка логирования в файл
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ---------- Конфигурация ----------
 API_ID = int(os.getenv("API_ID", 12345))
@@ -26,21 +37,26 @@ def load_jobs():
             data = json.load(f)
             jobs = data.get("jobs", {})
             job_counter = data.get("counter", 0)
+        logger.info(f"Загружено {sum(len(j['reminds']) for j in jobs.values())} напоминаний")
     except FileNotFoundError:
         jobs = {}
         job_counter = 0
+        logger.info("Файл jobs.json не найден, создан новый")
 
 def save_jobs():
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"jobs": jobs, "counter": job_counter}, f, ensure_ascii=False, indent=2)
+    logger.info("Сохранено заданий")
 
 # ---------- Отправка упоминаний ----------
 async def send_reminder(chat_id, text, thread_id=None):
     try:
+        logger.info(f"Начинаем отправку упоминаний в чат {chat_id} с текстом: {text}")
         users = []
         async for member in app.get_chat_members(chat_id):
             if not member.user.is_bot:
                 users.append(member.user)
+        logger.info(f"Найдено {len(users)} участников (боты исключены)")
 
         if not users:
             await app.send_message(chat_id, "Нет участников для упоминания.", reply_to_message_id=thread_id)
@@ -65,10 +81,13 @@ async def send_reminder(chat_id, text, thread_id=None):
             )
             await asyncio.sleep(0.5)
 
-        print(f"Упомянуто {len(users)} участников в чате {chat_id}")
+        logger.info(f"Упомянуто {len(users)} участников в чате {chat_id}")
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-        await app.send_message(chat_id, "Ошибка при отправке упоминаний. Проверьте права бота.")
+        logger.error(f"Ошибка отправки: {e}")
+        try:
+            await app.send_message(chat_id, f"❌ Ошибка при отправке упоминаний: {e}\nПроверьте права бота.")
+        except:
+            pass
 
 # ---------- Планировщик ----------
 async def scheduler_loop():
@@ -80,11 +99,14 @@ async def scheduler_loop():
             reminds = chat_data.get("reminds", [])
             for remind in reminds[:]:
                 if remind["next_run"] <= now:
+                    logger.info(f"Сработало напоминание ID {remind['id']} в чате {chat_id}")
                     await send_reminder(chat_id, remind["text"], thread_id)
                     if remind.get("interval") is not None:
                         remind["next_run"] += remind["interval"]
+                        logger.info(f"Обновлено время для ID {remind['id']} на {datetime.fromtimestamp(remind['next_run'])}")
                     else:
                         reminds.remove(remind)
+                        logger.info(f"Удалено разовое напоминание ID {remind['id']}")
             if not reminds:
                 del jobs[chat_id_str]
         save_jobs()
@@ -99,7 +121,7 @@ async def start_handler(client, message: Message):
         " /set_remind HH:MM Текст – разовое\n"
         " /set_remind HH:MM daily Текст – ежедневно\n"
         " /set_remind HH:MM weekly Текст – еженедельно\n"
-        " /set_remind HH:MM N Текст – каждые N часов\n"
+        " /set_remind HH:MM 2 Текст – каждые 2 часа\n"
         " /list_reminds – список\n"
         " /cancel_remind [ID] – отменить все или по ID\n"
         " /help – справка\n\n"
@@ -163,46 +185,38 @@ async def cancel_remind(client, message: Message):
 @app.on_message(filters.command("set_remind"))
 async def set_remind(client, message: Message):
     try:
-        # Парсинг команды с помощью shlex, чтобы правильно обрабатывать кавычки и пробелы
-        # Но для простоты будем разбирать вручную
-        full_text = message.text
-        # Убираем команду
-        parts = shlex.split(full_text)
-        if len(parts) < 3:
-            await message.reply("Неверный формат. Пример: /set_remind 20:00 daily Текст")
+        if not message.chat.type in ['group', 'supergroup']:
+            await message.reply("Команда только в группах.")
             return
 
-        # parts[0] - команда, parts[1] - время, parts[2] - ключевое слово или текст
-        time_str = parts[1]
-        rest = parts[2:]  # всё что после времени
-
-        # Определяем ключевое слово (daily, weekly или число)
-        keyword = None
-        text_parts = []
-        # Проверяем первый элемент rest
-        if rest:
-            first = rest[0].lower()
-            if first in ("daily", "weekly"):
-                keyword = first
-                text_parts = rest[1:] if len(rest) > 1 else []
-            elif re.match(r'^\d+$', first):
-                keyword = first  # число часов
-                text_parts = rest[1:] if len(rest) > 1 else []
-            else:
-                # значит, это часть текста (разовое)
-                text_parts = rest
-
-        if not text_parts:
-            await message.reply("Укажите текст напоминания.")
+        text = message.text
+        command_parts = text.split(maxsplit=1)
+        if len(command_parts) < 2:
+            await message.reply("Пример: /set_remind 20:00 daily Текст")
             return
 
-        text = " ".join(text_parts)
+        args_str = command_parts[1].strip()
+        pattern = r'^(\d{1,2}:\d{2})\s+(?:(daily|weekly|\d+)\s+)?(.+)$'
+        match = re.match(pattern, args_str)
 
-        # парсим время
+        if not match:
+            await message.reply(
+                "Неверный формат. Используйте:\n"
+                "/set_remind 20:00 Текст\n"
+                "/set_remind 20:00 daily Текст\n"
+                "/set_remind 20:00 weekly Текст\n"
+                "/set_remind 20:00 2 Текст (каждые 2 часа)"
+            )
+            return
+
+        time_str = match.group(1)
+        keyword = match.group(2)
+        text = match.group(3)
+
         try:
             remind_time = datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await message.reply("Неверный формат времени. Используйте HH:MM (например, 20:00).")
+            await message.reply("Неверный формат времени.")
             return
 
         now = datetime.now()
@@ -213,19 +227,22 @@ async def set_remind(client, message: Message):
         interval = None
         if keyword is None:
             pass
-        elif keyword == "daily":
+        elif keyword.lower() == "daily":
             interval = 86400
-        elif keyword == "weekly":
+        elif keyword.lower() == "weekly":
             interval = 604800
         elif keyword.isdigit():
             hours = int(keyword)
             if hours <= 0:
-                await message.reply("Интервал должен быть больше 0 часов.")
+                await message.reply("Интервал > 0.")
                 return
             interval = hours * 3600
         else:
-            await message.reply("Неизвестное ключевое слово. Используйте daily, weekly или число часов.")
+            await message.reply("Неизвестное ключевое слово.")
             return
+
+        chat_id = str(message.chat.id)
+        thread_id = message.reply_to_message.id if message.reply_to_message else None
 
         global job_counter
         job_counter += 1
@@ -236,9 +253,6 @@ async def set_remind(client, message: Message):
             "next_run": scheduled.timestamp(),
             "interval": interval
         }
-
-        chat_id = str(message.chat.id)
-        thread_id = message.reply_to_message.id if message.reply_to_message else None
 
         if chat_id not in jobs:
             jobs[chat_id] = {"thread_id": thread_id, "reminds": []}
@@ -254,17 +268,18 @@ async def set_remind(client, message: Message):
             f"Тип: {period}\n"
             f"Текст: {text}"
         )
+        logger.info(f"Добавлено напоминание ID {rem_id} в чат {chat_id}")
     except Exception as e:
-        print(f"Ошибка set_remind: {e}")
-        await message.reply("Произошла ошибка. Проверьте формат команды.")
+        logger.error(f"set_remind: {e}")
+        await message.reply("Произошла ошибка. Проверьте формат.")
 
 # ---------- Запуск ----------
 async def main():
     load_jobs()
     asyncio.create_task(scheduler_loop())
+    logger.info("Бот запущен. Планировщик активен.")
     print("Бот запущен. Планировщик активен.")
     await app.start()
-    # Бесконечное ожидание (замена idle)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
