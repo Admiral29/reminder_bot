@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import re
+import shlex
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -98,7 +99,7 @@ async def start_handler(client, message: Message):
         " /set_remind HH:MM Текст – разовое\n"
         " /set_remind HH:MM daily Текст – ежедневно\n"
         " /set_remind HH:MM weekly Текст – еженедельно\n"
-        " /set_remind HH:MM 2 Текст – каждые 2 часа\n"
+        " /set_remind HH:MM N Текст – каждые N часов\n"
         " /list_reminds – список\n"
         " /cancel_remind [ID] – отменить все или по ID\n"
         " /help – справка\n\n"
@@ -162,48 +163,46 @@ async def cancel_remind(client, message: Message):
 @app.on_message(filters.command("set_remind"))
 async def set_remind(client, message: Message):
     try:
-        chat_id = str(message.chat.id)
-        thread_id = message.reply_to_message.id if message.reply_to_message else None
-
-        # Получаем полный аргумент после команды
-        full_arg = message.text.split(maxsplit=1)
-        if len(full_arg) < 2:
-            await message.reply("Пример: /set_remind 20:00 daily Текст")
+        # Парсинг команды с помощью shlex, чтобы правильно обрабатывать кавычки и пробелы
+        # Но для простоты будем разбирать вручную
+        full_text = message.text
+        # Убираем команду
+        parts = shlex.split(full_text)
+        if len(parts) < 3:
+            await message.reply("Неверный формат. Пример: /set_remind 20:00 daily Текст")
             return
-        arg_str = full_arg[1].strip()
 
-        # Парсим время первым словом
-        parts = arg_str.split(maxsplit=1)
-        if len(parts) < 2:
-            await message.reply("Укажите время и текст.")
-            return
-        time_str = parts[0]
-        rest = parts[1].strip()
+        # parts[0] - команда, parts[1] - время, parts[2] - ключевое слово или текст
+        time_str = parts[1]
+        rest = parts[2:]  # всё что после времени
 
-        # Проверяем, есть ли ключевое слово (daily, weekly, число) в начале rest
-        words = rest.split()
+        # Определяем ключевое слово (daily, weekly или число)
         keyword = None
-        text = None
+        text_parts = []
+        # Проверяем первый элемент rest
+        if rest:
+            first = rest[0].lower()
+            if first in ("daily", "weekly"):
+                keyword = first
+                text_parts = rest[1:] if len(rest) > 1 else []
+            elif re.match(r'^\d+$', first):
+                keyword = first  # число часов
+                text_parts = rest[1:] if len(rest) > 1 else []
+            else:
+                # значит, это часть текста (разовое)
+                text_parts = rest
 
-        if words and words[0].lower() in ("daily", "weekly"):
-            keyword = words[0].lower()
-            text = " ".join(words[1:]) if len(words) > 1 else ""
-        elif words and re.match(r'^\d+$', words[0]):
-            keyword = words[0]  # число часов
-            text = " ".join(words[1:]) if len(words) > 1 else ""
-        else:
-            # нет ключевого слова, весь rest - текст
-            text = rest
-
-        if not text:
+        if not text_parts:
             await message.reply("Укажите текст напоминания.")
             return
 
-        # Парсим время
+        text = " ".join(text_parts)
+
+        # парсим время
         try:
             remind_time = datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await message.reply("Неверный формат времени. Используйте HH:MM, например 20:00")
+            await message.reply("Неверный формат времени. Используйте HH:MM (например, 20:00).")
             return
 
         now = datetime.now()
@@ -213,7 +212,6 @@ async def set_remind(client, message: Message):
 
         interval = None
         if keyword is None:
-            # разовое
             pass
         elif keyword == "daily":
             interval = 86400
@@ -229,7 +227,6 @@ async def set_remind(client, message: Message):
             await message.reply("Неизвестное ключевое слово. Используйте daily, weekly или число часов.")
             return
 
-        # Создаём напоминание
         global job_counter
         job_counter += 1
         rem_id = job_counter
@@ -239,6 +236,9 @@ async def set_remind(client, message: Message):
             "next_run": scheduled.timestamp(),
             "interval": interval
         }
+
+        chat_id = str(message.chat.id)
+        thread_id = message.reply_to_message.id if message.reply_to_message else None
 
         if chat_id not in jobs:
             jobs[chat_id] = {"thread_id": thread_id, "reminds": []}
@@ -264,7 +264,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     print("Бот запущен. Планировщик активен.")
     await app.start()
-    # Бесконечное ожидание
+    # Бесконечное ожидание (замена idle)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
