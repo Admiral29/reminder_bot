@@ -1,25 +1,23 @@
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
+from pyrogram.types import BotCommand
 import os
 import asyncio
 import json
 import re
 from datetime import datetime, timedelta
-import pytz  # если не установлен, выполните pip install pytz
 
-# ---------- КОНФИГУРАЦИЯ ----------
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Если хотите использовать местное время (например, Москва), раскомментируйте:
-# TIMEZONE = pytz.timezone('Europe/Moscow')
-# и в коде ниже замените datetime.now() на datetime.now(TIMEZONE)
+# ⭐ Укажите ID темы, в которой должен работать бот (или None для всех тем)
+ALLOWED_THREAD_ID = 84   # замените на ваш ID или оставьте None
 
 app = Client("mention_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 JOBS_FILE = "jobs.json"
-jobs = {}        # { chat_id: [ {id, text, next_run, interval}, ... ] }
+jobs = {}
 job_counter = 0
 
 def load_jobs():
@@ -37,6 +35,12 @@ def load_jobs():
 def save_jobs():
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"jobs": jobs, "counter": job_counter}, f, ensure_ascii=False, indent=2)
+
+# ---------- ПРОВЕРКА ТЕМЫ ----------
+def is_allowed(message):
+    if ALLOWED_THREAD_ID is None:
+        return True
+    return message.message_thread_id == ALLOWED_THREAD_ID
 
 # ---------- ОТПРАВКА УПОМИНАНИЙ ----------
 async def send_reminder(chat_id, text):
@@ -67,7 +71,7 @@ async def send_reminder(chat_id, text):
 # ---------- ПЛАНИРОВЩИК ----------
 async def scheduler_loop():
     while True:
-        now = datetime.utcnow().timestamp()  # используем UTC
+        now = datetime.utcnow().timestamp()
         for chat_id_str, reminds in list(jobs.items()):
             chat_id = int(chat_id_str)
             for r in reminds[:]:
@@ -82,8 +86,12 @@ async def scheduler_loop():
         save_jobs()
         await asyncio.sleep(30)
 
-# ---------- КОМАНДА /all ----------
-@app.on_message(filters.command("all") & filters.group)
+# ---------- ФИЛЬТР ТЕМЫ ДЛЯ ВСЕХ КОМАНД ----------
+def topic_filter(_, __, message):
+    return is_allowed(message)
+
+# ---------- КОМАНДЫ ----------
+@app.on_message(filters.command("all") & filters.group & filters.create(topic_filter))
 async def mention_all(client, message):
     chat_id = message.chat.id
     try:
@@ -108,8 +116,7 @@ async def mention_all(client, message):
     except Exception as e:
         await message.reply(f"Ошибка: {e}")
 
-# ---------- КОМАНДА /start ----------
-@app.on_message(filters.command("start") & filters.group)
+@app.on_message(filters.command("start") & filters.group & filters.create(topic_filter))
 async def start_cmd(client, message):
     await message.reply(
         "👋 Команды:\n"
@@ -124,8 +131,7 @@ async def start_cmd(client, message):
         "Если ваш часовой пояс +3 (Москва), то для 20:00 по Москве пишите 17:00 UTC."
     )
 
-# ---------- КОМАНДА /list_reminds ----------
-@app.on_message(filters.command("list_reminds") & filters.group)
+@app.on_message(filters.command("list_reminds") & filters.group & filters.create(topic_filter))
 async def list_reminds(client, message):
     chat_id = str(message.chat.id)
     if chat_id not in jobs or not jobs[chat_id]:
@@ -139,8 +145,7 @@ async def list_reminds(client, message):
         text += f"ID {r['id']}: {dt} ({period}) – {r['text'][:30]}...\n"
     await message.reply(text)
 
-# ---------- КОМАНДА /cancel_remind ----------
-@app.on_message(filters.command("cancel_remind") & filters.group)
+@app.on_message(filters.command("cancel_remind") & filters.group & filters.create(topic_filter))
 async def cancel_remind(client, message):
     chat_id = str(message.chat.id)
     if chat_id not in jobs or not jobs[chat_id]:
@@ -164,8 +169,7 @@ async def cancel_remind(client, message):
     except ValueError:
         await message.reply("Укажите корректный ID.")
 
-# ---------- КОМАНДА /set_remind ----------
-@app.on_message(filters.command("set_remind") & filters.group)
+@app.on_message(filters.command("set_remind") & filters.group & filters.create(topic_filter))
 async def set_remind(client, message):
     try:
         args = message.text.split(maxsplit=1)
@@ -182,7 +186,6 @@ async def set_remind(client, message):
         keyword = match.group(2)
         text = match.group(3)
 
-        # Парсим время (UTC)
         remind_time = datetime.strptime(time_str, "%H:%M")
         now = datetime.utcnow()
         scheduled = datetime(now.year, now.month, now.day, remind_time.hour, remind_time.minute)
@@ -231,12 +234,25 @@ async def set_remind(client, message):
     except Exception as e:
         await message.reply(f"Ошибка: {e}")
 
+# ---------- УСТАНОВКА МЕНЮ КОМАНД (при вводе "/") ----------
+async def set_commands():
+    commands = [
+        BotCommand("all", "Упомянуть всех участников"),
+        BotCommand("set_remind", "Установить напоминание (разовое, daily, weekly, с интервалом)"),
+        BotCommand("list_reminds", "Показать активные напоминания"),
+        BotCommand("cancel_remind", "Отменить все или конкретное напоминание"),
+        BotCommand("start", "Показать справку"),
+    ]
+    await app.set_bot_commands(commands)
+    print("✅ Меню команд установлено.")
+
 # ---------- ЗАПУСК ----------
 async def main():
     load_jobs()
     asyncio.create_task(scheduler_loop())
-    print("🚀 Бот запущен. Планировщик активен.")
     await app.start()
+    await set_commands()  # Устанавливаем команды
+    print("🚀 Бот запущен. Планировщик активен.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
