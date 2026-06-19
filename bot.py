@@ -1,7 +1,7 @@
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 import os
 
-# ---------- КОНФИГУРАЦИЯ (читаем из переменных окружения) ----------
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -29,7 +29,7 @@ async def mention_all(client, message):
         for i in range(0, len(mentions), chunk_size):
             chunk = mentions[i:i+chunk_size]
             msg = "📢 Всем привет!\n\n" + " ".join(chunk)
-            await app.send_message(chat_id, msg, parse_mode="html")
+            await app.send_message(chat_id, msg, parse_mode=ParseMode.HTML)  # ✅ Исправлено
     except Exception as e:
         await message.reply(f"Ошибка: {e}\nПроверьте, что я администратор.")
 
