@@ -7,9 +7,9 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 # ---------- Конфигурация ----------
-API_ID = int(os.getenv("API_ID", 34973373))        # замените на свои
-API_HASH = os.getenv("API_HASH", "59def5ad8aa679cff55d76d647174ee8")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8740498225:AAHCGDwtSV4eND-jEnBLNdY1NHNcpNNMzyk")
+API_ID = int(os.getenv("API_ID", 12345))
+API_HASH = os.getenv("API_HASH", "your_api_hash")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token")
 JOBS_FILE = "jobs.json"
 
 app = Client("reminder_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -255,7 +255,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     print("Бот запущен. Планировщик активен.")
     await app.start()
-    # Бесконечное ожидание (замена idle)
+    # Бесконечное ожидание (замена app.idle)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
