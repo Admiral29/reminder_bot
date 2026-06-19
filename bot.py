@@ -164,18 +164,23 @@ async def set_remind(client, message: Message):
     try:
         chat_id = str(message.chat.id)
         thread_id = message.reply_to_message.id if message.reply_to_message else None
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
+
+        # Получаем полный аргумент после команды
+        full_arg = message.text.split(maxsplit=1)
+        if len(full_arg) < 2:
             await message.reply("Пример: /set_remind 20:00 daily Текст")
             return
+        arg_str = full_arg[1].strip()
 
-        parts = args[1].split(maxsplit=2)
+        # Парсим время первым словом
+        parts = arg_str.split(maxsplit=1)
         if len(parts) < 2:
-            await message.reply("Неверный формат.")
+            await message.reply("Укажите время и текст.")
             return
-
         time_str = parts[0]
-        rest = parts[1]
+        rest = parts[1].strip()
+
+        # Проверяем, есть ли ключевое слово (daily, weekly, число) в начале rest
         words = rest.split()
         keyword = None
         text = None
@@ -184,19 +189,21 @@ async def set_remind(client, message: Message):
             keyword = words[0].lower()
             text = " ".join(words[1:]) if len(words) > 1 else ""
         elif words and re.match(r'^\d+$', words[0]):
-            keyword = words[0]
+            keyword = words[0]  # число часов
             text = " ".join(words[1:]) if len(words) > 1 else ""
         else:
+            # нет ключевого слова, весь rest - текст
             text = rest
 
         if not text:
-            await message.reply("Укажите текст.")
+            await message.reply("Укажите текст напоминания.")
             return
 
+        # Парсим время
         try:
             remind_time = datetime.strptime(time_str, "%H:%M")
         except ValueError:
-            await message.reply("Неверный формат времени. Используйте HH:MM")
+            await message.reply("Неверный формат времени. Используйте HH:MM, например 20:00")
             return
 
         now = datetime.now()
@@ -206,6 +213,7 @@ async def set_remind(client, message: Message):
 
         interval = None
         if keyword is None:
+            # разовое
             pass
         elif keyword == "daily":
             interval = 86400
@@ -214,13 +222,14 @@ async def set_remind(client, message: Message):
         elif keyword.isdigit():
             hours = int(keyword)
             if hours <= 0:
-                await message.reply("Интервал > 0.")
+                await message.reply("Интервал должен быть больше 0 часов.")
                 return
             interval = hours * 3600
         else:
-            await message.reply("Неизвестный ключ.")
+            await message.reply("Неизвестное ключевое слово. Используйте daily, weekly или число часов.")
             return
 
+        # Создаём напоминание
         global job_counter
         job_counter += 1
         rem_id = job_counter
@@ -241,13 +250,13 @@ async def set_remind(client, message: Message):
         period = "разовое" if interval is None else f"каждые {interval//3600} ч." if interval < 86400 else "ежедневно" if interval == 86400 else "еженедельно"
         await message.reply(
             f"✅ Напоминание ID {rem_id} установлено.\n"
-            f"Первое: {scheduled.strftime('%d.%m.%Y %H:%M')}\n"
+            f"Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')}\n"
             f"Тип: {period}\n"
             f"Текст: {text}"
         )
     except Exception as e:
         print(f"Ошибка set_remind: {e}")
-        await message.reply("Ошибка. Проверьте формат.")
+        await message.reply("Произошла ошибка. Проверьте формат команды.")
 
 # ---------- Запуск ----------
 async def main():
@@ -255,7 +264,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     print("Бот запущен. Планировщик активен.")
     await app.start()
-    # Бесконечное ожидание (замена app.idle)
+    # Бесконечное ожидание
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
