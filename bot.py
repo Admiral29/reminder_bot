@@ -109,11 +109,20 @@ async def start_cmd(client, message):
     await message.reply(
         "👋 Команды:\n"
         "/all – упомянуть всех\n"
-        "/set_remind HH:MM Текст – разовое\n"
-        "/set_remind HH:MM daily Текст – ежедневно\n"
-        "/set_remind HH:MM weekly Текст – еженедельно\n"
-        "/set_remind HH:MM 2 Текст – каждые 2 часа\n"
-        "/list_reminds – список\n"
+        "/set_remind HH:MM [интервал] Текст\n"
+        "   интервал (необязательно):\n"
+        "   • daily – каждый день\n"
+        "   • weekly – каждую неделю\n"
+        "   • число (например, 2) – часы (каждые 2 часа)\n"
+        "   • число + h (например, 3h) – часы\n"
+        "   • число + d (например, 2d) – дни (каждые 2 дня)\n"
+        "   • число + w (например, 1w) – недели\n"
+        "   Примеры:\n"
+        "   /set_remind 20:00 Разовое\n"
+        "   /set_remind 20:00 daily Ежедневное\n"
+        "   /set_remind 20:00 2d Через день\n"
+        "   /set_remind 20:00 3h Каждые 3 часа\n"
+        "/list_reminds – список активных\n"
         "/cancel_remind [ID] – отменить все или по ID\n\n"
         "⚠️ Время указывается в UTC (по Гринвичу).\n"
         "Например, для 20:00 по Москве пишите 17:00 UTC."
@@ -130,7 +139,19 @@ async def list_reminds(client, message):
     for r in jobs[chat_id]:
         dt = datetime.utcfromtimestamp(r["next_run"]).strftime("%d.%m.%Y %H:%M UTC")
         interval = r.get("interval")
-        period = "разовое" if interval is None else ("ежедневно" if interval == 86400 else "еженедельно" if interval == 604800 else f"каждые {interval//3600} ч.")
+        if interval is None:
+            period = "разовое"
+        elif interval == 86400:
+            period = "ежедневно"
+        elif interval == 604800:
+            period = "еженедельно"
+        else:
+            hours = interval // 3600
+            if interval % 86400 == 0:
+                days = interval // 86400
+                period = f"каждые {days} дн."
+            else:
+                period = f"каждые {hours} ч."
         text += f"ID {r['id']}: {dt} ({period}) – {r['text'][:30]}...\n"
     await message.reply(text)
 
@@ -159,46 +180,74 @@ async def cancel_remind(client, message):
     except ValueError:
         await message.reply("Укажите корректный ID.")
 
-# ---------- КОМАНДА /set_remind ----------
+# ---------- КОМАНДА /set_remind (с поддержкой расширенных интервалов) ----------
 @app.on_message(filters.command("set_remind") & filters.group)
 async def set_remind(client, message):
     try:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            await message.reply("Пример: /set_remind 20:00 daily Текст")
+            await message.reply("❌ Пример: /set_remind 20:00 daily Текст")
             return
         arg_str = args[1].strip()
-        pattern = r'^(\d{1,2}:\d{2})\s+(?:(daily|weekly|\d+)\s+)?(.+)$'
-        match = re.match(pattern, arg_str)
-        if not match:
-            await message.reply("Неверный формат.\nПример: /set_remind 20:00 daily Текст")
-            return
-        time_str = match.group(1)
-        keyword = match.group(2)
-        text = match.group(3)
 
+        # Расширенный шаблон: время, затем необязательный интервал, затем текст
+        pattern = r'^(\d{1,2}:\d{2})\s+(?:(daily|weekly|(\d+)([hdw])?)\s+)?(.+)$'
+        match = re.match(pattern, arg_str, re.IGNORECASE)
+        if not match:
+            await message.reply(
+                "❌ Неверный формат.\n"
+                "Правильно:\n"
+                "/set_remind 20:00 Текст – разовое\n"
+                "/set_remind 20:00 daily Текст – ежедневно\n"
+                "/set_remind 20:00 weekly Текст – еженедельно\n"
+                "/set_remind 20:00 2 Текст – каждые 2 часа\n"
+                "/set_remind 20:00 3h Текст – каждые 3 часа\n"
+                "/set_remind 20:00 2d Текст – каждые 2 дня\n"
+                "/set_remind 20:00 1w Текст – каждую неделю"
+            )
+            return
+
+        time_str = match.group(1)
+        keyword = match.group(2)                 # daily, weekly, или None
+        num = match.group(3)                     # число, если ввели
+        unit = match.group(4)                    # h, d, w или None
+        text = match.group(5)
+
+        # Парсим время
         remind_time = datetime.strptime(time_str, "%H:%M")
         now = datetime.utcnow()
         scheduled = datetime(now.year, now.month, now.day, remind_time.hour, remind_time.minute)
         if scheduled < now:
             scheduled += timedelta(days=1)
 
+        # Определяем интервал в секундах
         interval = None
-        if keyword is None:
+        if keyword is None and num is None:
+            # разовое
             pass
-        elif keyword.lower() == "daily":
-            interval = 86400
-        elif keyword.lower() == "weekly":
-            interval = 604800
-        elif keyword.isdigit():
-            hours = int(keyword)
-            if hours <= 0:
-                await message.reply("Интервал должен быть > 0.")
+        elif keyword is not None:
+            if keyword.lower() == "daily":
+                interval = 86400          # 24 часа
+            elif keyword.lower() == "weekly":
+                interval = 604800         # 7 дней
+            else:
+                await message.reply("❌ Неизвестное ключевое слово.")
                 return
-            interval = hours * 3600
         else:
-            await message.reply("Неизвестное ключевое слово (используйте daily, weekly или число часов).")
-            return
+            # Есть число и возможно единица
+            val = int(num)
+            if unit is None or unit.lower() == 'h':
+                interval = val * 3600     # часы
+            elif unit.lower() == 'd':
+                interval = val * 86400    # дни
+            elif unit.lower() == 'w':
+                interval = val * 604800   # недели
+            else:
+                await message.reply("❌ Неизвестная единица. Используйте h, d, w или ничего (часы).")
+                return
+            if interval <= 0:
+                await message.reply("❌ Интервал должен быть больше 0.")
+                return
 
         global job_counter
         job_counter += 1
@@ -215,21 +264,35 @@ async def set_remind(client, message):
         jobs[chat_id].append(new_job)
         save_jobs()
 
-        period = "разовое" if interval is None else ("ежедневно" if interval == 86400 else "еженедельно" if interval == 604800 else f"каждые {interval//3600} ч.")
+        # Формируем читаемое описание периода
+        if interval is None:
+            period = "разовое"
+        elif interval == 86400:
+            period = "ежедневно"
+        elif interval == 604800:
+            period = "еженедельно"
+        else:
+            hours = interval // 3600
+            if interval % 86400 == 0:
+                days = interval // 86400
+                period = f"каждые {days} дн."
+            else:
+                period = f"каждые {hours} ч."
+
         await message.reply(
             f"✅ Напоминание ID {rem_id} установлено.\n"
-            f"Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')} UTC\n"
-            f"Тип: {period}\n"
-            f"Текст: {text}"
+            f"🕐 Первое срабатывание: {scheduled.strftime('%d.%m.%Y %H:%M')} UTC\n"
+            f"🔄 Тип: {period}\n"
+            f"📝 Текст: {text}"
         )
     except Exception as e:
-        await message.reply(f"Ошибка: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 # ---------- МЕНЮ КОМАНД ----------
 async def set_commands():
     commands = [
         BotCommand("all", "Упомянуть всех участников"),
-        BotCommand("set_remind", "Установить напоминание"),
+        BotCommand("set_remind", "Установить напоминание (разовое / с интервалом)"),
         BotCommand("list_reminds", "Показать активные напоминания"),
         BotCommand("cancel_remind", "Отменить напоминание"),
         BotCommand("start", "Помощь"),
@@ -243,7 +306,7 @@ async def main():
     asyncio.create_task(scheduler_loop())
     await app.start()
     await set_commands()
-    print("🚀 Бот запущен. Все команды доступны всем участникам.")
+    print("🚀 Бот запущен. Поддерживаются интервалы: daily, weekly, часы (число), дни (число+d), недели (число+w).")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
